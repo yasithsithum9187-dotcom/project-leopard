@@ -4,10 +4,10 @@ from ultralytics import YOLO
 import time
 import streamlit as st
 import math
+import tempfile
 
-# Streamlit UI Config
-st.set_page_config(page_title="Project Leopard - Autonomous Navigation Engine", layout="wide")
-st.title("🐆 Project Leopard - Autonomous Navigation & Vision Engine")
+st.set_page_config(page_title="Project Leopard - Dual Autonomous Engine", layout="wide")
+st.title("🐆 Project Leopard - Integrated Vision & Navigation Dashboard")
 
 @st.cache_resource
 def load_model():
@@ -15,107 +15,127 @@ def load_model():
 
 model = load_model()
 
-# Sidebar Setup
-st.sidebar.header("🎯 Target & Control Panel")
-target_x = st.sidebar.slider("Target X Location (m)", 10, 390, 350)
-target_y = st.sidebar.slider("Target Y Location (m)", 10, 390, 50)
+# Sidebar Controls
+st.sidebar.header("🕹️ Project Leopard Controls")
+video_source = st.sidebar.radio("Select Driving Feed:", ["Demo Video (ride_test.mp4)", "Upload Custom Video"])
 
-run_sim = st.sidebar.checkbox("🚀 Start Autonomous Navigation", value=False)
+if video_source == "Upload Custom Video":
+    uploaded_file = st.sidebar.file_uploader("Upload Driving Video (.mp4)", type=['mp4', 'avi', 'mov'])
+else:
+    uploaded_file = None
 
-# UI Layout
+target_x = st.sidebar.slider("Target Destination X", 20, 380, 320)
+target_y = st.sidebar.slider("Target Destination Y", 20, 380, 60)
+
+run_sim = st.sidebar.checkbox("🚀 Launch Integrated Autonomous Simulation", value=False)
+
+# Top Metrics
 col1, col2, col3, col4 = st.columns(4)
 speed_metric = col1.metric("Target Speed", "0 Km/h")
 steering_metric = col2.metric("Steering Angle", "0 DEG")
 dist_metric = col3.metric("Distance to Target", "0 m")
 status_metric = col4.metric("System Status", "OFFLINE")
 
-map_placeholder = st.empty()
+# Side-by-Side Displays (Left: Vision, Right: Radar Map)
+v_col, m_col = st.columns(2)
+vision_placeholder = v_col.empty()
+map_placeholder = m_col.empty()
 
-# Vehicle Initial State
 if 'car_pos' not in st.session_state:
-    st.session_state.car_pos = [50.0, 350.0]  # Start Position (X, Y)
-    st.session_state.car_heading = -90.0      # Heading angle in degrees (facing up)
+    st.session_state.car_pos = [60.0, 340.0]
+    st.session_state.car_heading = -90.0
 
 if run_sim:
-    log_file = open("auto_train_data.txt", "a", encoding="utf-8")
-    
-    # Simulation Loop
-    while run_sim:
-        # Create 2D Map Canvas (400x400)
-        map_canvas = np.zeros((400, 400, 3), dtype=np.uint8)
-        
-        # Draw Target Location (Red Circle)
-        cv2.circle(map_canvas, (int(target_x), int(target_y)), 10, (0, 0, 255), -1)
-        cv2.putText(map_canvas, "TARGET", (int(target_x) - 20, int(target_y) - 15), 
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 255), 1)
+    # Determine video stream source
+    if uploaded_file is not None:
+        tfile = tempfile.NamedTemporaryFile(delete=False)
+        tfile.write(uploaded_file.read())
+        cap = cv2.VideoCapture(tfile.name)
+    else:
+        cap = cv2.VideoCapture("ride_test.mp4")
 
-        # Draw Dynamic Obstacles (Yellow Circles)
-        obstacles = [(200, 200, 25), (150, 120, 20), (280, 250, 30)]
+    while run_sim and cap.isOpened():
+        ret, frame = cap.read()
+        if not ret:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+            continue
+
+        # Resize for smooth performance
+        frame = cv2.resize(frame, (640, 480))
+        
+        # 1. AI Vision Processing
+        results = model(frame, conf=0.35, verbose=False)
+        annotated_frame = results[0].plot()
+
+        # 2. 2D Radar Map Canvas
+        map_canvas = np.zeros((480, 480, 3), dtype=np.uint8)
+        
+        # Grid lines for visual appeal
+        for i in range(0, 480, 40):
+            cv2.line(map_canvas, (i, 0), (i, 480), (25, 25, 25), 1)
+            cv2.line(map_canvas, (0, i), (480, i), (25, 25, 25), 1)
+
+        # Draw Target
+        cv2.circle(map_canvas, (int(target_x), int(target_y)), 12, (0, 0, 255), -1)
+        cv2.putText(map_canvas, "TARGET", (int(target_x)-25, int(target_y)-18),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 255), 1)
+
+        # Draw Obstacles
+        obstacles = [(220, 220, 30), (140, 150, 25), (300, 280, 35)]
         for ox, oy, orad in obstacles:
             cv2.circle(map_canvas, (ox, oy), orad, (0, 255, 255), -1)
-            cv2.putText(map_canvas, "OBSTACLE", (ox - 25, oy), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (0, 0, 0), 1)
+            cv2.putText(map_canvas, "OBSTACLE", (ox-30, oy+5), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 0), 1)
 
-        # Current Car Coordinates
+        # Kinematic Steering Logic
         cx, cy = st.session_state.car_pos
-        
-        # Calculate Distance to Target
         dx = target_x - cx
         dy = target_y - cy
         dist_to_target = math.hypot(dx, dy)
-        
-        # Navigation & Steering Logic
-        if dist_to_target > 10:
+
+        if dist_to_target > 15:
             desired_angle = math.degrees(math.atan2(dy, dx))
             steering_angle = int(desired_angle - st.session_state.car_heading)
-            
-            # Normalize Angle (-180 to 180)
             steering_angle = (steering_angle + 180) % 360 - 180
-            
-            # Obstacle Avoidance Offset
+
             for ox, oy, orad in obstacles:
-                dist_to_obs = math.hypot(ox - cx, oy - cy)
-                if dist_to_obs < orad + 35:
-                    steering_angle += 45  # Avoid Obstacle
-                    
-            # Vehicle Speed Control
-            target_speed = 30 if abs(steering_angle) < 15 else 12
-            traffic_status = "NAVIGATING TO LOCATION"
-            
-            # Kinematic Update (Move Vehicle)
-            st.session_state.car_heading += steering_angle * 0.1
+                if math.hypot(ox - cx, oy - cy) < orad + 40:
+                    steering_angle += 45
+
+            target_speed = 35 if abs(steering_angle) < 15 else 15
+            status_str = "AUTONOMOUS NAVIGATING"
+
+            st.session_state.car_heading += steering_angle * 0.08
             rad = math.radians(st.session_state.car_heading)
-            st.session_state.car_pos[0] += math.cos(rad) * (target_speed * 0.08)
-            st.session_state.car_pos[1] += math.sin(rad) * (target_speed * 0.08)
+            st.session_state.car_pos[0] += math.cos(rad) * (target_speed * 0.07)
+            st.session_state.car_pos[1] += math.sin(rad) * (target_speed * 0.07)
         else:
             target_speed = 0
             steering_angle = 0
-            traffic_status = "🎯 DESTINATION REACHED!"
+            status_str = "🎯 DESTINATION REACHED"
 
-        # Draw Vehicle Path Line
-        cv2.line(map_canvas, (int(cx), int(cy)), (int(target_x), int(target_y)), (100, 100, 100), 1)
-
-        # Draw EGO Vehicle (Green Arrow / Rect)
+        # Draw Ego Vehicle
         car_x, car_y = int(st.session_state.car_pos[0]), int(st.session_state.car_pos[1])
-        cv2.circle(map_canvas, (car_x, car_y), 8, (0, 255, 0), -1)
+        cv2.circle(map_canvas, (car_x, car_y), 10, (0, 255, 0), -1)
+        cv2.line(map_canvas, (car_x, car_y), (int(target_x), int(target_y)), (100, 100, 100), 1)
         
-        # Vehicle Heading Direction Vector
+        # Vehicle Direction Indicator
         head_rad = math.radians(st.session_state.car_heading)
-        head_x = int(car_x + math.cos(head_rad) * 20)
-        head_y = int(car_y + math.sin(head_rad) * 20)
-        cv2.line(map_canvas, (car_x, car_y), (head_x, head_y), (255, 255, 255), 2)
-        cv2.putText(map_canvas, "MY CAR", (car_x - 20, car_y + 20), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 0), 1)
+        cv2.line(map_canvas, (car_x, car_y),
+                 (int(car_x + math.cos(head_rad)*25), int(car_y + math.sin(head_rad)*25)),
+                 (255, 255, 255), 3)
 
-        # Display Navigation Output
-        rgb_map = cv2.cvtColor(map_canvas, cv2.COLOR_BGR2RGB)
-        map_placeholder.image(rgb_map, caption="2D Live Autonomous Map & Kinematic Simulation", width=600)
-        
-        # Update Telemetry Metrics
+        # Convert colors & Display Side-by-Side
+        vision_rgb = cv2.cvtColor(annotated_frame, cv2.COLOR_BGR2RGB)
+        map_rgb = cv2.cvtColor(map_canvas, cv2.COLOR_BGR2RGB)
+
+        vision_placeholder.image(vision_rgb, caption="📷 Real-Time AI Camera Vision (YOLO Perception)", use_container_width=True)
+        map_placeholder.image(map_rgb, caption="🗺️ 2D Navigation Radar & Path Planner", use_container_width=True)
+
         speed_metric.metric("Target Speed", f"{int(target_speed)} Km/h")
         steering_metric.metric("Steering Angle", f"{int(steering_angle)} DEG")
         dist_metric.metric("Distance to Target", f"{int(dist_to_target)} m")
-        status_metric.metric("System Status", traffic_status)
-        
-        log_file.write(f"{time.time()},{target_speed},{steering_angle},{traffic_status}\n")
-        time.sleep(0.05)
-        
-    log_file.close()
+        status_metric.metric("System Status", status_str)
+
+        time.sleep(0.03)
+
+    cap.release()
